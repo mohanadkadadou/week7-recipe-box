@@ -1,6 +1,9 @@
+from fractions import Fraction
+
+import pytest
 from fastapi.testclient import TestClient
 
-from main import app
+from main import app, scale_ingredient
 
 client = TestClient(app)
 
@@ -100,3 +103,129 @@ def test_shopping_list_malformed_ids():
         r = client.get("/shopping-list", params={"ids": bad})
         assert r.status_code == 422, bad
     assert client.get("/shopping-list").status_code == 422
+
+
+def _make_recipe(ingredients):
+    return client.post(
+        "/recipes", json={"title": "Scale me", "ingredients": ingredients}
+    ).json()["id"]
+
+
+def _scaled(rid, factor):
+    return client.get(f"/recipes/{rid}/scaled", params={"factor": factor})
+
+
+def test_scaled_doubles_quantities():
+    rid = _make_recipe(["200 g flour", "2 eggs", "1 cup milk"])
+    r = _scaled(rid, 2)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ingredients"] == ["400 g flour", "4 eggs", "2 cup milk"]
+    assert body["id"] == rid and body["title"] == "Scale me"
+    assert body["factor"] == 2
+
+
+def test_scaled_does_not_modify_stored_recipe():
+    rid = _make_recipe(["200 g flour"])
+    _scaled(rid, 3)
+    assert client.get(f"/recipes/{rid}").json()["ingredients"] == ["200 g flour"]
+
+
+def test_scaled_fractional_factor_and_decimals():
+    rid = _make_recipe(["200 g flour", "1 egg", "0.5 tsp salt"])
+    assert _scaled(rid, 0.5).json()["ingredients"] == [
+        "100 g flour",
+        "0.5 egg",
+        "0.25 tsp salt",
+    ]
+
+
+def test_scaled_handles_fraction_and_mixed_quantities():
+    rid = _make_recipe(["1/2 cup sugar", "1 1/2 cup water"])
+    assert _scaled(rid, 2).json()["ingredients"] == ["1 cup sugar", "3 cup water"]
+
+
+def test_scaled_leaves_ingredients_without_quantity_unchanged():
+    rid = _make_recipe(["salt to taste", "", "2 eggs"])
+    assert _scaled(rid, 2).json()["ingredients"] == ["salt to taste", "", "4 eggs"]
+
+
+def test_scaled_factor_one_is_identity_for_simple_quantities():
+    rid = _make_recipe(["200 g flour", "salt"])
+    assert _scaled(rid, 1).json()["ingredients"] == ["200 g flour", "salt"]
+
+
+def test_scaled_unknown_recipe_404():
+    assert _scaled(99999, 2).status_code == 404
+
+
+def test_scaled_rejects_invalid_factor():
+    rid = _make_recipe(["200 g flour"])
+    for bad in ["0", "-1", "abc", "nan", "inf", "1e308", "1001", "0.0001"]:
+        assert _scaled(rid, bad).status_code == 422, bad
+
+
+def test_scaled_requires_factor():
+    rid = _make_recipe(["200 g flour"])
+    assert client.get(f"/recipes/{rid}/scaled").status_code == 422
+
+
+def test_scaled_factor_bounds_are_accepted():
+    rid = _make_recipe(["200 g flour"])
+    assert _scaled(rid, 1000).json()["ingredients"] == ["200000 g flour"]
+    assert _scaled(rid, 0.001).json()["ingredients"] == ["0.2 g flour"]
+
+
+@pytest.mark.parametrize(
+    "ingredient, factor, expected",
+    [
+        ("200 g flour", "2", "400 g flour"),
+        ("200g flour", "2", "400g flour"),  # no space before the unit
+        ("1/3 cup oil", "0.67", "0.22 cup oil"),  # rounding to 2 decimals
+        ("1 1/2 cup water", "2", "3 cup water"),
+        ("1,5 l milk", "2", "1,5 l milk"),  # decimal comma: untouched
+        (".5 tsp salt", "2", "1 tsp salt"),
+        ("0.001 g saffron", "0.5", "0.0005 g saffron"),  # small: not collapsed to 0
+        ("1 pinch salt", "0.001", "0.001 pinch salt"),
+        ("999999999 g x", "1000", "999999999000 g x"),  # huge but finite
+        ("3/0 x", "2", "3/0 x"),  # zero denominator
+        ("1 1/0 x", "2", "1 1/0 x"),
+        ("1-2 tbsp oil", "2", "1-2 tbsp oil"),  # ranges: left alone
+        ("1 to 2 eggs", "2", "1 to 2 eggs"),
+        ("1/2-1 cup", "2", "1/2-1 cup"),
+        ("2x3 tray", "2", "2x3 tray"),
+        ("1. egg", "2", "1. egg"),
+        ("2xlarge eggs", "2", "2xlarge eggs"),  # dimension-like: untouched
+        ("2 x 3 tray", "2", "2 x 3 tray"),
+        ("2 xanthan gum", "2", "4 xanthan gum"),  # a spaced word is still a unit
+        ("1/2/3 x", "2", "1/2/3 x"),
+        ("2 \u00bd cups", "2", "2 \u00bd cups"),  # unicode fractions: all or nothing
+        ("1\u00bd cups", "2", "1\u00bd cups"),
+        ("\u00bd cup", "2", "\u00bd cup"),
+        ("0 g x", "2", "0 g x"),  # zero must not crash (log10(0))
+        ("0.0 cup", "2", "0 cup"),
+        ("0/5 cup", "2", "0 cup"),
+        ("0.000000001 g", "0.001", "0.000000000001 g"),  # tiny but non-zero: kept
+        ("12 3/4 cups", "2", "25.5 cups"),  # mixed number, decimal result
+        ("salt to taste", "2", "salt to taste"),
+        ("", "2", ""),
+        ("  3 eggs", "2", "6 eggs"),
+        ("1" * 400 + " g x", "2", "1" * 400 + " g x"),  # too long: untouched
+    ],
+)
+def test_scale_ingredient(ingredient, factor, expected):
+    assert scale_ingredient(ingredient, Fraction(factor)) == expected
+
+
+def test_scaled_zero_quantity_does_not_500():
+    rid = _make_recipe(["0 g salt", "0.0 cup x", "2 eggs"])
+    for factor in (2, 0.001, 0.3333, 1000):
+        r = _scaled(rid, factor)
+        assert r.status_code == 200, factor
+        assert r.json()["ingredients"][0] == "0 g salt"
+
+
+def test_scaled_echoes_factor():
+    rid = _make_recipe(["2 eggs"])
+    assert _scaled(rid, 2).json()["factor"] == 2.0
+    assert _scaled(rid, 0.5).json()["factor"] == 0.5
