@@ -100,3 +100,68 @@ def test_shopping_list_malformed_ids():
         r = client.get("/shopping-list", params={"ids": bad})
         assert r.status_code == 422, bad
     assert client.get("/shopping-list").status_code == 422
+
+
+def _make_recipe(ingredients):
+    return client.post(
+        "/recipes", json={"title": "Scale me", "ingredients": ingredients}
+    ).json()["id"]
+
+
+def _scaled(rid, factor):
+    return client.get(f"/recipes/{rid}/scaled", params={"factor": factor})
+
+
+def test_scaled_doubles_quantities():
+    rid = _make_recipe(["200 g flour", "2 eggs", "1 cup milk"])
+    r = _scaled(rid, 2)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ingredients"] == ["400 g flour", "4 eggs", "2 cup milk"]
+    assert body["id"] == rid and body["title"] == "Scale me"
+    assert body["factor"] == 2
+
+
+def test_scaled_does_not_modify_stored_recipe():
+    rid = _make_recipe(["200 g flour"])
+    _scaled(rid, 3)
+    assert client.get(f"/recipes/{rid}").json()["ingredients"] == ["200 g flour"]
+
+
+def test_scaled_fractional_factor_and_decimals():
+    rid = _make_recipe(["200 g flour", "1 egg", "0.5 tsp salt"])
+    assert _scaled(rid, 0.5).json()["ingredients"] == [
+        "100 g flour",
+        "0.5 egg",
+        "0.25 tsp salt",
+    ]
+
+
+def test_scaled_handles_fraction_and_mixed_quantities():
+    rid = _make_recipe(["1/2 cup sugar", "1 1/2 cup water"])
+    assert _scaled(rid, 2).json()["ingredients"] == ["1 cup sugar", "3 cup water"]
+
+
+def test_scaled_leaves_ingredients_without_quantity_unchanged():
+    rid = _make_recipe(["salt to taste", "", "2 eggs"])
+    assert _scaled(rid, 2).json()["ingredients"] == ["salt to taste", "", "4 eggs"]
+
+
+def test_scaled_factor_one_is_identity_for_simple_quantities():
+    rid = _make_recipe(["200 g flour", "salt"])
+    assert _scaled(rid, 1).json()["ingredients"] == ["200 g flour", "salt"]
+
+
+def test_scaled_unknown_recipe_404():
+    assert _scaled(99999, 2).status_code == 404
+
+
+def test_scaled_rejects_invalid_factor():
+    rid = _make_recipe(["200 g flour"])
+    for bad in ["0", "-1", "abc", "nan", "inf"]:
+        assert _scaled(rid, bad).status_code == 422, bad
+
+
+def test_scaled_requires_factor():
+    rid = _make_recipe(["200 g flour"])
+    assert client.get(f"/recipes/{rid}/scaled").status_code == 422

@@ -12,11 +12,13 @@ Test:
 """
 
 import json
+import re
 import sqlite3
 from contextlib import closing
+from fractions import Fraction
 from pathlib import Path
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
@@ -100,6 +102,45 @@ def get_recipe(recipe_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="unknown recipe")
     return _row_to_recipe(row)
+
+
+def _parse_quantity(text: str) -> tuple[Fraction, str] | None:
+    """Split "200 g flour" into (Fraction(200), " g flour"); None if no leading number."""
+    m = re.match(r"\s*(\d+)\s+(\d+)/(\d+)(?=\s|$)", text)  # mixed: 1 1/2
+    if m:
+        whole, num, den = m.groups()
+        if int(den):
+            return Fraction(int(whole)) + Fraction(int(num), int(den)), text[m.end() :]
+    m = re.match(r"\s*(\d+)/(\d+)(?=\s|$)", text)  # fraction: 3/4
+    if m and int(m.group(2)):
+        return Fraction(int(m.group(1)), int(m.group(2))), text[m.end() :]
+    m = re.match(r"\s*(\d+(?:\.\d+)?)", text)  # integer or decimal
+    if m:
+        return Fraction(m.group(1)), text[m.end() :]
+    return None
+
+
+def _format_quantity(value: Fraction) -> str:
+    """Render without trailing zeros, rounded to at most 2 decimals (2.5, not 5/2)."""
+    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+
+
+def scale_ingredient(ingredient: str, factor: Fraction) -> str:
+    """Scale the leading quantity of one ingredient; leave "salt to taste" untouched."""
+    parsed = _parse_quantity(ingredient)
+    if parsed is None:
+        return ingredient
+    quantity, rest = parsed
+    return _format_quantity(quantity * factor) + rest
+
+
+@app.get("/recipes/{recipe_id}/scaled")
+def scaled_recipe(recipe_id: int, factor: float = Query(gt=0, allow_inf_nan=False)):
+    """The recipe with each ingredient's leading quantity multiplied by factor."""
+    recipe = get_recipe(recipe_id)
+    exact = Fraction(str(factor))
+    recipe["ingredients"] = [scale_ingredient(i, exact) for i in recipe["ingredients"]]
+    return {**recipe, "factor": factor}
 
 
 @app.get("/shopping-list")
