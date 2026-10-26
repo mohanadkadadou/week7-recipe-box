@@ -1,6 +1,9 @@
+from fractions import Fraction
+
+import pytest
 from fastapi.testclient import TestClient
 
-from main import app
+from main import app, scale_ingredient
 
 client = TestClient(app)
 
@@ -158,10 +161,45 @@ def test_scaled_unknown_recipe_404():
 
 def test_scaled_rejects_invalid_factor():
     rid = _make_recipe(["200 g flour"])
-    for bad in ["0", "-1", "abc", "nan", "inf"]:
+    for bad in ["0", "-1", "abc", "nan", "inf", "1e308", "1001", "0.0001"]:
         assert _scaled(rid, bad).status_code == 422, bad
 
 
 def test_scaled_requires_factor():
     rid = _make_recipe(["200 g flour"])
     assert client.get(f"/recipes/{rid}/scaled").status_code == 422
+
+
+def test_scaled_factor_bounds_are_accepted():
+    rid = _make_recipe(["200 g flour"])
+    assert _scaled(rid, 1000).json()["ingredients"] == ["200000 g flour"]
+    assert _scaled(rid, 0.001).json()["ingredients"] == ["0.2 g flour"]
+
+
+@pytest.mark.parametrize(
+    "ingredient, factor, expected",
+    [
+        ("200 g flour", "2", "400 g flour"),
+        ("200g flour", "2", "400g flour"),  # no space before the unit
+        ("1/3 cup oil", "0.67", "0.22 cup oil"),  # rounding to 2 decimals
+        ("1 1/2 cup water", "2", "3 cup water"),
+        ("1,5 l milk", "2", "1,5 l milk"),  # decimal comma: untouched
+        (".5 tsp salt", "2", "1 tsp salt"),
+        ("0.001 g saffron", "0.5", "0.0005 g saffron"),  # small: not collapsed to 0
+        ("1 pinch salt", "0.001", "0.001 pinch salt"),
+        ("999999999 g x", "1000", "999999999000 g x"),  # huge but finite
+        ("3/0 x", "2", "3/0 x"),  # zero denominator
+        ("1 1/0 x", "2", "1 1/0 x"),
+        ("1-2 tbsp oil", "2", "1-2 tbsp oil"),  # ranges: left alone
+        ("1 to 2 eggs", "2", "1 to 2 eggs"),
+        ("1/2-1 cup", "2", "1/2-1 cup"),
+        ("2x3 tray", "2", "2x3 tray"),
+        ("1. egg", "2", "1. egg"),
+        ("salt to taste", "2", "salt to taste"),
+        ("", "2", ""),
+        ("  3 eggs", "2", "6 eggs"),
+        ("1" * 400 + " g x", "2", "1" * 400 + " g x"),  # too long: untouched
+    ],
+)
+def test_scale_ingredient(ingredient, factor, expected):
+    assert scale_ingredient(ingredient, Fraction(factor)) == expected

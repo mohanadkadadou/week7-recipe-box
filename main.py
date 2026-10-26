@@ -12,6 +12,7 @@ Test:
 """
 
 import json
+import math
 import re
 import sqlite3
 from contextlib import closing
@@ -104,25 +105,52 @@ def get_recipe(recipe_id: int):
     return _row_to_recipe(row)
 
 
+_QUANTITY = re.compile(
+    r"""\s*(?:
+        (?P<whole>\d{1,9})\s+(?P<n1>\d{1,9})/(?P<d1>\d{1,9})   # mixed: 1 1/2
+      | (?P<n2>\d{1,9})/(?P<d2>\d{1,9})                        # fraction: 3/4
+      | (?P<dec>\d{1,9}(?:\.\d{1,9})?|\.\d{1,9})              # 2, 2.5, .5
+    )(?=\s|[A-Za-z]|$)""",
+    re.VERBOSE,
+)
+# After the number: a range ("1-2", "1 to 2"), a dimension ("2x3") or a stray
+# fraction ("1 1/0") means this is not a plain quantity, so it is left unchanged.
+_NOT_PLAIN = re.compile(r"\s*(?:(?:to|or|[-\u2013\u2014x\u00d7])\s*\d|\d+/\d)", re.IGNORECASE)
+
+
 def _parse_quantity(text: str) -> tuple[Fraction, str] | None:
-    """Split "200 g flour" into (Fraction(200), " g flour"); None if no leading number."""
-    m = re.match(r"\s*(\d+)\s+(\d+)/(\d+)(?=\s|$)", text)  # mixed: 1 1/2
-    if m:
-        whole, num, den = m.groups()
-        if int(den):
-            return Fraction(int(whole)) + Fraction(int(num), int(den)), text[m.end() :]
-    m = re.match(r"\s*(\d+)/(\d+)(?=\s|$)", text)  # fraction: 3/4
-    if m and int(m.group(2)):
-        return Fraction(int(m.group(1)), int(m.group(2))), text[m.end() :]
-    m = re.match(r"\s*(\d+(?:\.\d+)?)", text)  # integer or decimal
-    if m:
-        return Fraction(m.group(1)), text[m.end() :]
-    return None
+    """Split "200 g flour" into (Fraction(200), " g flour").
+
+    Returns None (leave the text alone) when there is no leading number or it is
+    not a plain one: ranges, zero denominators, "1,5", "1.", "2x3". Unicode
+    fractions such as "1/2" written as a single character are not supported.
+    """
+    m = _QUANTITY.match(text)
+    if not m:
+        return None
+    rest = text[m.end() :]
+    if _NOT_PLAIN.match(rest):
+        return None
+    if m["whole"] is not None:
+        if not int(m["d1"]):
+            return None
+        return Fraction(int(m["whole"])) + Fraction(int(m["n1"]), int(m["d1"])), rest
+    if m["n2"] is not None:
+        if not int(m["d2"]):
+            return None
+        return Fraction(int(m["n2"]), int(m["d2"])), rest
+    return Fraction(m["dec"]), rest
 
 
 def _format_quantity(value: Fraction) -> str:
-    """Render without trailing zeros, rounded to at most 2 decimals (2.5, not 5/2)."""
-    return f"{float(value):.2f}".rstrip("0").rstrip(".")
+    """Render as a decimal without trailing zeros (2.5, not 5/2).
+
+    Lossy: 2 decimals at or above 0.1, otherwise enough decimals to keep two
+    significant figures, so small amounts never collapse to 0.
+    """
+    x = float(value)
+    decimals = 2 if x >= 0.1 else 1 - math.floor(math.log10(x))
+    return f"{x:.{decimals}f}".rstrip("0").rstrip(".")
 
 
 def scale_ingredient(ingredient: str, factor: Fraction) -> str:
@@ -135,8 +163,13 @@ def scale_ingredient(ingredient: str, factor: Fraction) -> str:
 
 
 @app.get("/recipes/{recipe_id}/scaled")
-def scaled_recipe(recipe_id: int, factor: float = Query(gt=0, allow_inf_nan=False)):
-    """The recipe with each ingredient's leading quantity multiplied by factor."""
+def scaled_recipe(
+    recipe_id: int, factor: float = Query(ge=0.001, le=1000, allow_inf_nan=False)
+):
+    """The recipe with each ingredient's leading quantity multiplied by factor.
+
+    The response also echoes `factor` (as a float, so 2 comes back as 2.0).
+    """
     recipe = get_recipe(recipe_id)
     exact = Fraction(str(factor))
     recipe["ingredients"] = [scale_ingredient(i, exact) for i in recipe["ingredients"]]
