@@ -80,10 +80,14 @@ def create_recipe(recipe: RecipeIn):
 
 
 @app.get("/recipes")
-def list_recipes():
+def list_recipes(tag: str | None = None):
     with closing(get_db()) as conn:
         rows = conn.execute("SELECT * FROM recipes ORDER BY id").fetchall()
-    return [_row_to_recipe(r) for r in rows]
+    recipes = [_row_to_recipe(r) for r in rows]
+    if tag is not None:
+        wanted = tag.casefold()
+        recipes = [r for r in recipes if any(t.casefold() == wanted for t in r["tags"])]
+    return recipes
 
 
 @app.get("/recipes/{recipe_id}")
