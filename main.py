@@ -93,3 +93,32 @@ def get_recipe(recipe_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail="unknown recipe")
     return _row_to_recipe(row)
+
+
+@app.get("/shopping-list")
+def shopping_list(ids: str):
+    """Merge the ingredients of the given recipes (comma-separated ids), de-duplicated."""
+    parts = [p.strip() for p in ids.split(",")]
+    try:
+        recipe_ids = [int(p) for p in parts]
+    except ValueError:
+        raise HTTPException(
+            status_code=422, detail="ids must be a comma-separated list of integers"
+        ) from None
+    with closing(get_db()) as conn:
+        found = {}
+        for rid in dict.fromkeys(recipe_ids):
+            row = conn.execute("SELECT * FROM recipes WHERE id = ?", (rid,)).fetchone()
+            if row is None:
+                raise HTTPException(status_code=404, detail=f"unknown recipe id {rid}")
+            found[rid] = json.loads(row["ingredients"])
+    seen: set[str] = set()
+    items: list[str] = []
+    for rid in dict.fromkeys(recipe_ids):
+        for ing in found[rid]:
+            name = ing.strip()
+            key = name.lower()
+            if name and key not in seen:
+                seen.add(key)
+                items.append(name)
+    return {"ids": list(dict.fromkeys(recipe_ids)), "ingredients": items}

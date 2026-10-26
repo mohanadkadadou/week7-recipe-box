@@ -28,3 +28,36 @@ def test_list_recipes():
 def test_unknown_recipe_404():
     r = client.get("/recipes/99999")
     assert r.status_code == 404
+
+
+def _make(title, ingredients):
+    return client.post("/recipes", json={"title": title, "ingredients": ingredients}).json()["id"]
+
+
+def test_shopping_list_merges_and_dedupes():
+    a = _make("A", ["Flour", "milk", "Eggs"])
+    b = _make("B", ["  flour ", "Sugar", "MILK"])
+    r = client.get(f"/shopping-list?ids={a},{b}")
+    assert r.status_code == 200
+    assert r.json()["ingredients"] == ["Flour", "milk", "Eggs", "Sugar"]
+
+
+def test_shopping_list_single_and_repeated_id():
+    a = _make("A", ["salt", "salt "])
+    r = client.get(f"/shopping-list?ids={a},{a}")
+    assert r.status_code == 200
+    assert r.json()["ingredients"] == ["salt"]
+
+
+def test_shopping_list_unknown_id_404():
+    a = _make("A", ["salt"])
+    r = client.get(f"/shopping-list?ids={a},99999")
+    assert r.status_code == 404
+    assert "99999" in r.json()["detail"]
+
+
+def test_shopping_list_malformed_ids():
+    for bad in ["a,b", "", "1,,2", "1,x"]:
+        r = client.get("/shopping-list", params={"ids": bad})
+        assert r.status_code == 422, bad
+    assert client.get("/shopping-list").status_code == 422
