@@ -123,7 +123,7 @@ def _parse_quantity(text: str) -> tuple[Fraction, str] | None:
 
     Returns None (leave the text alone) when there is no leading number or it is
     not a plain one: ranges, zero denominators, "1,5", "1.", "2x3". Unicode
-    fractions such as "1/2" written as a single character are not supported.
+    fractions (the half sign etc.) are not supported and are left unchanged.
     """
     m = _QUANTITY.match(text)
     if not m:
