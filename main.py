@@ -113,17 +113,24 @@ _QUANTITY = re.compile(
     )(?=\s|[A-Za-z]|$)""",
     re.VERBOSE,
 )
-# After the number: a range ("1-2", "1 to 2"), a dimension ("2x3") or a stray
-# fraction ("1 1/0") means this is not a plain quantity, so it is left unchanged.
-_NOT_PLAIN = re.compile(r"\s*(?:(?:to|or|[-\u2013\u2014x\u00d7])\s*\d|\d+/\d)", re.IGNORECASE)
+# After the number: a range ("1-2", "1 to 2"), a dimension ("2x3", "2 x 3",
+# "2xlarge"), a stray fraction ("1 1/0", "1/2/3") or a unicode vulgar fraction
+# (the half sign, etc.) means this is not a plain quantity, so the whole
+# ingredient is left unchanged rather than half-scaled.
+_NOT_PLAIN = re.compile(
+    r"(?:\s*(?:(?:to|or|[-\u2013\u2014x\u00d7])\s*\d|\d+/\d|/|[\u00bc-\u00be\u2150-\u215f\u2189])"
+    r"|[xX\u00d7][A-Za-z])",
+    re.IGNORECASE,
+)
 
 
 def _parse_quantity(text: str) -> tuple[Fraction, str] | None:
     """Split "200 g flour" into (Fraction(200), " g flour").
 
     Returns None (leave the text alone) when there is no leading number or it is
-    not a plain one: ranges, zero denominators, "1,5", "1.", "2x3". Unicode
-    fractions (the half sign etc.) are not supported and are left unchanged.
+    not a plain one: ranges, zero denominators, "1,5", "1.", "2x3",
+    "2xlarge", "1/2/3" and unicode fractions ("2 <half sign> cups"), which are
+    left entirely unchanged.
     """
     m = _QUANTITY.match(text)
     if not m:
@@ -146,8 +153,10 @@ def _format_quantity(value: Fraction) -> str:
     """Render as a decimal without trailing zeros (2.5, not 5/2).
 
     Lossy: 2 decimals at or above 0.1, otherwise enough decimals to keep two
-    significant figures, so small amounts never collapse to 0.
+    significant figures, so small amounts never collapse to 0. Zero is "0".
     """
+    if value == 0:
+        return "0"
     x = float(value)
     decimals = 2 if x >= 0.1 else 1 - math.floor(math.log10(x))
     return f"{x:.{decimals}f}".rstrip("0").rstrip(".")
@@ -167,6 +176,10 @@ def scaled_recipe(
     recipe_id: int, factor: float = Query(ge=0.001, le=1000, allow_inf_nan=False)
 ):
     """The recipe with each ingredient's leading quantity multiplied by factor.
+
+    Quantities are rounded: 2 decimals at or above 0.1, otherwise two
+    significant figures (so 0.001 g at factor 0.5 gives 0.0005). Ranges,
+    dimensions and unicode fractions are left unchanged.
 
     The response also echoes `factor` (as a float, so 2 comes back as 2.0).
     """

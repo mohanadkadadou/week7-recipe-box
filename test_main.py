@@ -195,6 +195,18 @@ def test_scaled_factor_bounds_are_accepted():
         ("1/2-1 cup", "2", "1/2-1 cup"),
         ("2x3 tray", "2", "2x3 tray"),
         ("1. egg", "2", "1. egg"),
+        ("2xlarge eggs", "2", "2xlarge eggs"),  # dimension-like: untouched
+        ("2 x 3 tray", "2", "2 x 3 tray"),
+        ("2 xanthan gum", "2", "4 xanthan gum"),  # a spaced word is still a unit
+        ("1/2/3 x", "2", "1/2/3 x"),
+        ("2 \u00bd cups", "2", "2 \u00bd cups"),  # unicode fractions: all or nothing
+        ("1\u00bd cups", "2", "1\u00bd cups"),
+        ("\u00bd cup", "2", "\u00bd cup"),
+        ("0 g x", "2", "0 g x"),  # zero must not crash (log10(0))
+        ("0.0 cup", "2", "0 cup"),
+        ("0/5 cup", "2", "0 cup"),
+        ("0.000000001 g", "0.001", "0.000000000001 g"),  # tiny but non-zero: kept
+        ("12 3/4 cups", "2", "25.5 cups"),  # mixed number, decimal result
         ("salt to taste", "2", "salt to taste"),
         ("", "2", ""),
         ("  3 eggs", "2", "6 eggs"),
@@ -203,3 +215,17 @@ def test_scaled_factor_bounds_are_accepted():
 )
 def test_scale_ingredient(ingredient, factor, expected):
     assert scale_ingredient(ingredient, Fraction(factor)) == expected
+
+
+def test_scaled_zero_quantity_does_not_500():
+    rid = _make_recipe(["0 g salt", "0.0 cup x", "2 eggs"])
+    for factor in (2, 0.001, 0.3333, 1000):
+        r = _scaled(rid, factor)
+        assert r.status_code == 200, factor
+        assert r.json()["ingredients"][0] == "0 g salt"
+
+
+def test_scaled_echoes_factor():
+    rid = _make_recipe(["2 eggs"])
+    assert _scaled(rid, 2).json()["factor"] == 2.0
+    assert _scaled(rid, 0.5).json()["factor"] == 0.5
